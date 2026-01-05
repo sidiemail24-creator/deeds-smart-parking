@@ -1,0 +1,254 @@
+***** DeedsMcE Project File *****
+* If you read this message, you need to install the last version of Deeds! *
+FVR 3
+SYS 1
+CPU 1
+FCK 2
+ROM 4
+RAM 4
+PIA 0
+PIB 1
+PIC 2
+PID 3
+PIE 4
+PIF 5
+PIG 6
+PIH 7
+POA 0
+POB 1
+POC 2
+POD 3
+POE 4
+POF 5
+POG 6
+POH 7
+INT 007 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 006 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 005 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 004 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 003 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 002 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 001 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+INT 000 SRC 002 PRT 000 TMD 001 TIN 019 EIN 003 
+******* Project File END ********
+; ==========================================
+; CPU_A - Smart Parking (2 CPU system)
+; Sends COUNT (0..5) to CPU_B after every valid event
+;
+; Inputs:
+;   IA.0 = S_IN   (entry sensor / switch)
+;   IA.1 = S_OUT  (exit sensor / switch)
+;
+; Outputs:
+;   OC.0 = GATE pulse
+;   OC.1 = FULL indicator
+;   OC.2 = BLOCKED indicator (denied entry when full)
+;
+; Handshake to CPU_B:
+;   OA (port 00h) = data bus (COUNT)
+;   OB.0 (port 01h) = STB
+;   IB.0 (port 01h) = ACK
+;
+; Registers:
+;   B = COUNT (0..5)
+;   C = OLD sensor bits (bit0=S_IN, bit1=S_OUT)
+;   E = OC state (bit0=GATE, bit1=FULL, bit2=BLOCKED)
+;   H = current sensors snapshot
+;   D = delay counter
+; ==========================================
+
+RESET:  JP START
+
+START:
+        LD  B,00h
+        LD  C,00h
+        LD  E,00h
+        LD  A,E
+        OUT (02h),A        ; OC = 0
+        LD  A,00h
+        OUT (01h),A        ; OB = 0 (STB=0)
+
+MAIN:
+        IN  A,(00h)        ; read IA (sensors)
+        LD  H,A            ; H = current sensors
+
+; ---- ENTRY rising edge on IA.0 ----
+        LD  A,H
+        AND 01h
+        JP  Z,CHK_EXIT
+        LD  A,C
+        AND 01h
+        JP  NZ,CHK_EXIT
+        CALL HANDLE_ENTRY
+
+CHK_EXIT:
+; ---- EXIT rising edge on IA.1 ----
+        LD  A,H
+        AND 02h
+        JP  Z,UPDATE_OLD
+        LD  A,C
+        AND 02h
+        JP  NZ,UPDATE_OLD
+        CALL HANDLE_EXIT
+
+UPDATE_OLD:
+        LD  A,H
+        AND 03h            ; keep bits 0..1 only
+        LD  C,A            ; OLD = current
+        JP  MAIN
+
+
+; =========================
+; HANDLE_ENTRY
+; =========================
+HANDLE_ENTRY:
+        LD  A,B
+        CP  05h
+        JP  Z,ENTRY_FULL   ; deny entry if already full
+
+        INC B              ; COUNT++
+        CALL GATE_PULSE
+
+        LD  A,B
+        CP  05h
+        JP  Z,BECAME_FULL
+
+        ; send updated count
+        LD  A,B
+        CALL SEND_BYTE
+        RET
+
+BECAME_FULL:
+        CALL FULL_ON
+        LD  A,B            ; will be 5
+        CALL SEND_BYTE
+        RET
+
+; Entry attempt while full:
+; Turn BLOCK ON and keep it ON until S_IN is released.
+ENTRY_FULL:
+        ; Force FULL+BLOCK directly (02h + 04h = 06h)
+        LD  A,06h
+        OUT (02h),A
+
+WAIT_REL_IN:
+        IN  A,(00h)
+        AND 01h
+        JP  NZ,WAIT_REL_IN
+
+        ; Back to FULL only
+        LD  A,02h
+        OUT (02h),A
+
+        LD  A,B
+        CALL SEND_BYTE
+        RET
+
+
+
+; =========================
+; HANDLE_EXIT
+; =========================
+HANDLE_EXIT:
+        LD  A,B
+        CP  00h
+        RET Z              ; if COUNT=0 ignore
+
+        DEC B              ; COUNT--
+        CALL GATE_PULSE
+
+        CALL FULL_OFF      ; after exit, not full
+        LD  A,B
+        CALL SEND_BYTE
+        RET
+
+
+; =========================
+; FULL control on OC.1
+; =========================
+FULL_ON:
+        LD  A,E
+        OR  02h            ; set bit1
+        LD  E,A
+        OUT (02h),A
+        RET
+
+FULL_OFF:
+        LD  A,E
+        AND 0FDh           ; clear bit1
+        LD  E,A
+        OUT (02h),A
+        RET
+
+
+; =========================
+; BLOCK control on OC.2
+; =========================
+BLOCK_ON:
+        LD  A,E
+        OR  04h            ; set bit2
+        LD  E,A
+        OUT (02h),A
+        RET
+
+BLOCK_OFF:
+        LD  A,E
+        AND 0FBh           ; clear bit2
+        LD  E,A
+        OUT (02h),A
+        RET
+
+
+; =========================
+; Gate pulse on OC.0
+; =========================
+GATE_PULSE:
+        LD  A,E
+        OR  01h            ; set bit0
+        LD  E,A
+        OUT (02h),A
+
+        CALL DELAY
+
+        LD  A,E
+        AND 0FEh           ; clear bit0
+        LD  E,A
+        OUT (02h),A
+        RET
+
+
+; =========================
+; Simple delay
+; =========================
+DELAY:
+        LD  D,0FFh
+DLY:    DEC D
+        JP  NZ,DLY
+        RET
+
+
+; =========================
+; SEND_BYTE: A = COUNT (0..5)
+; Handshake using STB/ACK on port 01h bit0
+; STB -> OB.0, ACK <- IB.0
+; =========================
+SEND_BYTE:
+        OUT (00h),A        ; DATA on OA bus
+
+        LD  A,01h          ; STB=1
+        OUT (01h),A
+
+WAIT_ACK1:
+        IN  A,(01h)        ; read IB
+        AND 01h
+        JP  Z,WAIT_ACK1
+
+        LD  A,00h          ; STB=0
+        OUT (01h),A
+
+WAIT_ACK0:
+        IN  A,(01h)
+        AND 01h
+        JP  NZ,WAIT_ACK0
+
+        RET
